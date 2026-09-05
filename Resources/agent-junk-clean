@@ -382,6 +382,10 @@ if (( DRY_RUN == 0 )) && [[ -z "$MACHINE_MODE" ]] && [[ ! -t 0 || ! -t 1 ]]; the
   die "interactive cleanup requires a terminal; use --dry-run for a non-interactive audit"
 fi
 
+if (( EUID == 0 )); then
+  die "refusing to run as root"
+fi
+
 command -v git >/dev/null 2>&1 || die "git is required"
 command -v find >/dev/null 2>&1 || die "find is required"
 command -v du >/dev/null 2>&1 || die "du is required"
@@ -395,6 +399,11 @@ fi
 CLEAN_HOME="${AGENT_JUNK_CLEAN_HOME:-$HOME}"
 [[ -n "$CLEAN_HOME" && "$CLEAN_HOME" == /* && -d "$CLEAN_HOME" ]] || die "home path is not an existing absolute directory"
 CLEAN_HOME=$(cd "$CLEAN_HOME" && pwd -P) || die "could not resolve home path"
+case "$CLEAN_HOME" in
+  /|/System|/Library|/Applications|/Users|/Volumes|/Network|/usr|/bin|/sbin|/etc|/opt|/var|/private|/private/var|/private/etc|/private/usr|/private/opt)
+    die "refusing system-wide cleanup scope: $CLEAN_HOME"
+    ;;
+esac
 CURRENT_PWD=$(pwd -P) || die "could not resolve the current working directory"
 
 if [[ -n "${AGENT_JUNK_CLEAN_SCAN_ROOTS:-}" ]]; then
@@ -503,14 +512,24 @@ add_protected() {
 }
 
 path_is_referenced() {
-  local path="$1" status
+  local path="$1" status diagnostics_file diagnostics
   command -v lsof >/dev/null 2>&1 || return 2
-  if lsof -n -P +D "$path" >/dev/null 2>&1; then
+  command -v mktemp >/dev/null 2>&1 || return 2
+  diagnostics_file=$(mktemp "${TMPDIR:-/tmp}/agent-junk-clean-lsof.XXXXXX") || return 2
+  if lsof -n -P +D "$path" > /dev/null 2> "$diagnostics_file"; then
+    delete_temporary_file "$diagnostics_file"
     return 0
   else
     status=$?
   fi
-  (( status == 1 )) && return 1
+  diagnostics=$(<"$diagnostics_file") || {
+    delete_temporary_file "$diagnostics_file"
+    return 2
+  }
+  delete_temporary_file "$diagnostics_file"
+  if (( status == 1 )) && [[ -z "$diagnostics" ]]; then
+    return 1
+  fi
   return 2
 }
 
@@ -554,6 +573,13 @@ path_is_active() {
   fi
   (( status == 1 )) && return 1
   return 2
+}
+
+is_safe_home_child() {
+  local path="$1" resolved
+  [[ "$CLEAN_HOME" != "/" && "$path" == "$CLEAN_HOME"/* && "$path" != *$'\n'* && "$path" != *$'\r'* && -d "$path" && ! -L "$path" ]] || return 1
+  resolved=$(cd "$path" && pwd -P) || return 1
+  [[ "$resolved" == "$path" && "$resolved" == "$CLEAN_HOME"/* ]]
 }
 
 resolve_path() {
@@ -762,6 +788,10 @@ verify_ref_snapshot() {
 discover_worktrees_from_repo() {
   local repo="$1" record path="" head="" branch="" flags="" main_path=""
   local size status_output ref_status oid stale_refs listing
+  if ! is_safe_home_child "$repo"; then
+    add_protected "Repository worktrees — $repo" "repository is outside the configured home or is not a canonical directory"
+    return 0
+  fi
   listing=$(git -C "$repo" worktree list --porcelain 2>/dev/null) || {
     add_protected "Repository worktrees — $repo" "Git worktree metadata could not be listed"
     return 0
@@ -782,6 +812,9 @@ discover_worktrees_from_repo() {
         elif [[ ! -d "$path" || ! -e "$path/.git" ]]; then
           progress_status "Inspecting linked worktree: $path"
           add_protected "Linked worktree — $path" "worktree path or metadata is missing"
+        elif ! is_safe_home_child "$path" || [[ -L "$path/.git" ]]; then
+          progress_status "Inspecting linked worktree: $path"
+          add_protected "Linked worktree — $path" "worktree path is outside the configured home or is not canonical"
         elif [[ -z "$branch" || "$branch" != refs/heads/* ]]; then
           progress_status "Inspecting linked worktree: $path"
           add_protected "Linked worktree — $path" "detached or unverifiable HEAD has no branch ref to preserve"
@@ -991,7 +1024,11 @@ node_modules_group_size_kb() {
 }
 
 inspect_node_modules_project() {
-  local project="$1" paths path_status activity now age activity_date size count head
+  local project="$1" paths path_status activity now age activity_date size count head status_output
+  if ! is_safe_home_child "$project"; then
+    add_protected "node_modules group — $project" "project is outside the configured home or is not a canonical directory"
+    return 0
+  fi
   progress_status "Discovering node_modules in project: $project"
   if paths=$(discover_project_node_modules_paths "$project"); then
     :
@@ -1011,10 +1048,14 @@ inspect_node_modules_project() {
     return 0
   fi
 
-  GIT_OPTIONAL_LOCKS=0 git -C "$project" status --porcelain --untracked-files=all >/dev/null 2>&1 || {
+  status_output=$(GIT_OPTIONAL_LOCKS=0 git -C "$project" status --porcelain --untracked-files=all 2>/dev/null) || {
     add_protected "node_modules group — $project" "Git status could not be verified"
     return 0
   }
+  if [[ -n "$status_output" ]]; then
+    add_protected "node_modules group — $project" "project is dirty or contains untracked files"
+    return 0
+  fi
 
   if ! node_modules_paths_are_untracked "$project" "$paths"; then
     add_protected "node_modules group — $project" "Git path verification failed or files under node_modules are tracked"
@@ -1090,7 +1131,7 @@ discover_node_modules() {
 }
 
 discover_caches() {
-  local child store_path size ref_status process_status
+  local child store_path resolved_store_path size ref_status process_status
 
   progress_status "Checking known renewable caches under $CLEAN_HOME"
 
@@ -1141,10 +1182,19 @@ discover_caches() {
       add_protected "pnpm store" "active-process state could not be verified (pgrep unavailable)"
     else
       store_path=$(pnpm store path 2>/dev/null) || store_path=""
-      if [[ -n "$store_path" && "$store_path" == "$CLEAN_HOME"/* && -d "$store_path" && ! -L "$store_path" ]]; then
-        store_path=$(cd "$store_path" && pwd -P) || store_path=""
-      else
-        store_path=""
+      if [[ -n "$store_path" ]]; then
+        if [[ "$store_path" == /* && "$store_path" != *$'\n'* && "$store_path" != *$'\r'* && -d "$store_path" && ! -L "$store_path" ]]; then
+          resolved_store_path=$(cd "$store_path" && pwd -P) || resolved_store_path=""
+          if [[ "$resolved_store_path" == "$store_path" ]] && is_safe_home_child "$resolved_store_path"; then
+            store_path="$resolved_store_path"
+          else
+            add_protected "pnpm store — $store_path" "store path resolved outside the configured home or is not canonical"
+            store_path=""
+          fi
+        else
+          add_protected "pnpm store — $store_path" "store path is not an existing canonical directory under the configured home"
+          store_path=""
+        fi
       fi
       if [[ -n "$store_path" ]]; then
         if path_is_active "$store_path" "pnpm store"; then
@@ -1374,7 +1424,7 @@ print_selected() {
 delete_exact_directory() {
   local path="$1"
   validate_cache_path "$path" || return 1
-  find "$path" -depth -delete
+  find -x "$path" -depth -delete
   [[ ! -e "$path" ]]
 }
 
@@ -1418,7 +1468,9 @@ execute_worktree() {
   ref=${CANDIDATE_REF[$index]}
   expected=${CANDIDATE_OID[$index]}
 
-  [[ -d "$path" && -e "$path/.git" && "$ref" == refs/heads/* ]] || return 2
+  is_safe_home_child "$repo" || return 2
+  is_safe_home_child "$path" || return 2
+  [[ "$path" != "$repo" && -e "$path/.git" && ! -L "$path/.git" && "$ref" == refs/heads/* ]] || return 2
   current=$(git -C "$repo" rev-parse --verify "$ref" 2>/dev/null) || return 2
   [[ "$current" == "$expected" ]] || return 2
   status_output=$(GIT_OPTIONAL_LOCKS=0 git -C "$path" status --porcelain --untracked-files=all 2>/dev/null) || return 2
@@ -1444,7 +1496,8 @@ execute_worktree_prune() {
   repo=${CANDIDATE_REPO[$index]}
   snapshot=${CANDIDATE_REF[$index]}
 
-  [[ -d "$repo" && -e "$repo/.git" ]] || return 2
+  is_safe_home_child "$repo" || return 2
+  [[ -e "$repo/.git" && ! -L "$repo/.git" ]] || return 2
   stale_metadata_is_safe_to_prune "$repo" || return 2
   verify_ref_snapshot "$repo" "$snapshot" || return 2
   git -C "$repo" worktree prune >&2 || return 1
@@ -1460,7 +1513,8 @@ execute_worktree_prune() {
 
 validate_node_modules_path() {
   local project="$1" path="$2" resolved owner
-  [[ "$path" != *$'\n'* && "$path" != *$'\r'* && -d "$path" && ! -L "$path" ]] || return 1
+  is_safe_home_child "$project" || return 1
+  is_safe_home_child "$path" || return 1
   resolved=$(cd "$path" && pwd -P) || return 1
   [[ "$resolved" == "$path" && "$path" == "$project"/* && "${path##*/}" == "node_modules" ]] || return 1
   owner=$(git -C "${path%/node_modules}" rev-parse --show-toplevel 2>/dev/null) || return 1
@@ -1469,17 +1523,19 @@ validate_node_modules_path() {
 }
 
 revalidate_node_modules_group() {
-  local index="$1" project expected_paths current_paths expected_head current_head current_pwd status activity now age size active_status count
+  local index="$1" project expected_paths current_paths expected_head current_head current_pwd status_output status activity now age size active_status count
   project=${CANDIDATE_PATH[$index]}
   expected_paths=${CANDIDATE_REF[$index]}
   expected_head=${CANDIDATE_OID[$index]}
 
-  [[ -d "$project" && -e "$project/.git" ]] || return 2
+  is_safe_home_child "$project" || return 2
+  [[ -e "$project/.git" && ! -L "$project/.git" ]] || return 2
   current_pwd=$(pwd -P) || return 2
   [[ "$current_pwd" != "$project" && "$current_pwd" != "$project"/* ]] || return 2
   current_head=$(git -C "$project" rev-parse --verify HEAD 2>/dev/null) || return 2
   [[ "$current_head" == "$expected_head" ]] || return 2
-  GIT_OPTIONAL_LOCKS=0 git -C "$project" status --porcelain --untracked-files=all >/dev/null 2>&1 || return 2
+  status_output=$(GIT_OPTIONAL_LOCKS=0 git -C "$project" status --porcelain --untracked-files=all 2>/dev/null) || return 2
+  [[ -z "$status_output" ]] || return 2
 
   current_paths=$(discover_project_node_modules_paths "$project") || return 2
   [[ "$current_paths" == "$expected_paths" ]] || return 2
@@ -1505,7 +1561,7 @@ revalidate_node_modules_group() {
 }
 
 delete_node_modules_group() {
-  local index="$1" project paths expected_head path active_status removed=0 failures="" current_head
+  local index="$1" project paths expected_head path active_status removed=0 failures="" current_head status_output
   project=${CANDIDATE_PATH[$index]}
   paths=${CANDIDATE_REF[$index]}
   expected_head=${CANDIDATE_OID[$index]}
@@ -1515,7 +1571,7 @@ delete_node_modules_group() {
     [[ -n "$path" ]] || continue
     if ! validate_node_modules_path "$project" "$path"; then
       failures="${failures}${failures:+; }validation changed before deletion: $path"
-      continue
+      break
     fi
     if path_is_active "$project" "node_modules project"; then
       active_status=0
@@ -1524,10 +1580,30 @@ delete_node_modules_group() {
     fi
     if (( active_status != 1 )); then
       failures="${failures}${failures:+; }project became active before deleting: $path"
-      continue
+      break
+    fi
+    current_head=$(git -C "$project" rev-parse --verify HEAD 2>/dev/null) || {
+      failures="${failures}${failures:+; }project HEAD could not be verified before deletion: $project"
+      break
+    }
+    if [[ "$current_head" != "$expected_head" ]]; then
+      failures="${failures}${failures:+; }project HEAD changed before deletion: $project"
+      break
+    fi
+    status_output=$(GIT_OPTIONAL_LOCKS=0 git -C "$project" status --porcelain --untracked-files=all 2>/dev/null) || {
+      failures="${failures}${failures:+; }project cleanliness could not be verified before deletion: $project"
+      break
+    }
+    if [[ -n "$status_output" ]]; then
+      failures="${failures}${failures:+; }project became dirty before deleting: $project"
+      break
+    fi
+    if ! node_modules_paths_are_untracked "$project" "$path"; then
+      failures="${failures}${failures:+; }node_modules path became tracked or could not be verified: $path"
+      break
     fi
     progress_status "Deleting node_modules: $path"
-    if find "$path" -depth -delete && [[ ! -e "$path" ]]; then
+    if find -x "$path" -depth -delete && [[ ! -e "$path" ]]; then
       removed=$((removed + 1))
     else
       failures="${failures}${failures:+; }deletion failed or path remained: $path"
@@ -1543,7 +1619,8 @@ delete_node_modules_group() {
 }
 
 execute_pnpm_store() {
-  local path="$1" current status
+  local path="$1" current resolved_current status
+  is_safe_home_child "$path" || return 2
   command -v pnpm >/dev/null 2>&1 || return 2
   if process_pattern_active '(^|/)(pnpm)( |$)|pnpm\.c?js'; then
     status=0
@@ -1552,7 +1629,10 @@ execute_pnpm_store() {
   fi
   (( status == 1 )) || return 2
   current=$(pnpm store path 2>/dev/null) || return 2
-  [[ "$current" == "$path" && "$current" == "$CLEAN_HOME"/* && -d "$current" && ! -L "$current" ]] || return 2
+  [[ "$current" == /* && "$current" != *$'\n'* && "$current" != *$'\r'* && -d "$current" && ! -L "$current" ]] || return 2
+  resolved_current=$(cd "$current" && pwd -P) || return 2
+  is_safe_home_child "$current" || return 2
+  [[ "$current" == "$resolved_current" && "$current" == "$path" ]] || return 2
   if path_is_active "$current" "pnpm store"; then
     status=0
   else
