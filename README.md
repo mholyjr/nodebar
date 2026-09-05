@@ -25,13 +25,18 @@ The build script creates and ad-hoc signs `NodeBar.app` for local use.
 - Lists Node.js processes that own TCP listeners for the current user.
 - Deduplicates IPv4 and IPv6 bindings while keeping the listening ports visible.
 - Refreshes automatically and provides a manual refresh action.
+- Labels recognized Node, Next, Vite, Nuxt, and Astro projects with a compact framework badge.
 - Stops a selected PID with `SIGTERM`, then offers an explicit `SIGKILL` after another identity check if it does not exit.
 - Validates a new port and the original process identity before a restart.
 - Shows the project directory and keeps the full command available in the row tooltip.
 
 ## Changing ports
 
-NodeBar can prepare a reviewed `--port` suggestion for recognizable Vite and Next CLI commands. For other processes, enter the command you normally use to start the server; NodeBar does not assume that an arbitrary Node process honors a port flag.
+NodeBar first checks the server's project directory and its bounded set of ancestors for `package.json`. It reads the package name, scripts, framework dependencies, and package manager metadata without executing any scripts. The `packageManager` field wins; otherwise NodeBar uses the nearest npm, pnpm, Yarn, or Bun lockfile.
+
+For recognized Next, Vite, Nuxt, and Astro projects, NodeBar suggests a `dev`, `start`, `preview`, or similarly named package script when its command directly invokes that framework. It invokes the script so its existing flags remain intact. For example, a pnpm project gets `pnpm run dev --port 3000`, while npm uses `npm run dev -- --port 3000`. When more than one suitable script exists, choose one from the selector in the restart dialog. These are reviewed suggestions; NodeBar does not execute scripts to discover what they do.
+
+For other processes, enter the command you normally use to start the server; NodeBar does not assume that an arbitrary Node process honors a port flag.
 
 The optional `PORT` setting is opt-in and only works when the framework reads that environment variable. Restarts run the reviewed command in the project directory through a login `zsh` environment. The original process environment is not copied.
 
