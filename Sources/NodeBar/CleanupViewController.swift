@@ -1,7 +1,10 @@
 import AppKit
 
 private enum CleanupLayout {
-    static let panelSize = NSSize(width: 400, height: 450)
+    static let panelWidth: CGFloat = 400
+    static let initialPanelHeight: CGFloat = 360
+    static let minimumPanelHeight: CGFloat = 320
+    static let maximumPanelHeight: CGFloat = 450
     static let headerHeight: CGFloat = 88
     static let footerHeight: CGFloat = 42
     static let rowHeight: CGFloat = 66
@@ -152,10 +155,17 @@ final class CleanupViewController: NSViewController, NSTextFieldDelegate {
     private let scrollView = NSScrollView()
     private let listView = CleanupListView()
     private let emptyLabel = NSTextField(wrappingLabelWithString: "")
+    private let logLabel = NSTextField(wrappingLabelWithString: "")
     private var audit: CleanupAudit?
     private var selectedKeys = Set<String>()
     private var lastRun: CleanupRun?
     private var isBusy = false
+    private var panelSize = NSSize(width: CleanupLayout.panelWidth, height: CleanupLayout.initialPanelHeight)
+    private var logLines: [String] = []
+    private var shouldFollowLog = true
+    private var logScrollObserver: NSObjectProtocol?
+    private var logLiveScrollObserver: NSObjectProtocol?
+    private var isUpdatingLogScroll = false
 
     var onPreferredSizeChange: ((NSSize) -> Void)?
 
@@ -164,13 +174,13 @@ final class CleanupViewController: NSViewController, NSTextFieldDelegate {
     init() {
         service = CleanupService()
         super.init(nibName: nil, bundle: nil)
-        preferredContentSize = CleanupLayout.panelSize
+        preferredContentSize = panelSize
     }
 
     init(service: CleanupService) {
         self.service = service
         super.init(nibName: nil, bundle: nil)
-        preferredContentSize = CleanupLayout.panelSize
+        preferredContentSize = panelSize
     }
 
     required init?(coder: NSCoder) {
@@ -178,8 +188,7 @@ final class CleanupViewController: NSViewController, NSTextFieldDelegate {
     }
 
     override func loadView() {
-        view = NSView(frame: NSRect(origin: .zero, size: CleanupLayout.panelSize))
-        view.wantsLayer = true
+        view = NSView(frame: NSRect(origin: .zero, size: panelSize))
     }
 
     override func viewDidLoad() {
@@ -187,7 +196,16 @@ final class CleanupViewController: NSViewController, NSTextFieldDelegate {
         setupView()
         applyLayout()
         renderContent()
-        onPreferredSizeChange?(CleanupLayout.panelSize)
+        onPreferredSizeChange?(panelSize)
+    }
+
+    deinit {
+        if let logScrollObserver {
+            NotificationCenter.default.removeObserver(logScrollObserver)
+        }
+        if let logLiveScrollObserver {
+            NotificationCenter.default.removeObserver(logLiveScrollObserver)
+        }
     }
 
     @objc private func scanPressed() {
@@ -199,6 +217,8 @@ final class CleanupViewController: NSViewController, NSTextFieldDelegate {
         audit = nil
         lastRun = nil
         isBusy = true
+        resetLog()
+        setPanelHeight(CleanupLayout.initialPanelHeight)
         scanButton.isEnabled = false
         ageField.isEnabled = false
         cancelButton.isEnabled = true
@@ -221,9 +241,11 @@ final class CleanupViewController: NSViewController, NSTextFieldDelegate {
             switch result {
             case .success(let audit):
                 self.audit = audit
+                self.setPanelHeight(audit.candidates.isEmpty ? CleanupLayout.initialPanelHeight : CleanupLayout.maximumPanelHeight)
                 self.statusLabel.stringValue = "Found \(audit.candidates.count) safe candidates · \(audit.protectedFindings.count) protected"
                 self.statusLabel.textColor = .secondaryLabelColor
             case .failure(let error):
+                self.setPanelHeight(CleanupLayout.initialPanelHeight)
                 self.statusLabel.stringValue = error.localizedDescription
                 self.statusLabel.textColor = .systemRed
                 self.show(message: error.localizedDescription, style: .warning)
@@ -264,6 +286,8 @@ final class CleanupViewController: NSViewController, NSTextFieldDelegate {
             return
         }
         isBusy = true
+        resetLog()
+        setPanelHeight(CleanupLayout.maximumPanelHeight)
         scanButton.isEnabled = false
         ageField.isEnabled = false
         cancelButton.isEnabled = false
@@ -347,11 +371,35 @@ final class CleanupViewController: NSViewController, NSTextFieldDelegate {
         progressIndicator.isDisplayedWhenStopped = false
         progressIndicator.isHidden = true
 
-        scrollView.borderType = .bezelBorder
+        scrollView.borderType = .noBorder
         scrollView.hasVerticalScroller = true
+        scrollView.hasHorizontalScroller = false
         scrollView.autohidesScrollers = true
         scrollView.drawsBackground = false
+        scrollView.contentView.postsBoundsChangedNotifications = true
         scrollView.documentView = listView
+
+        logLabel.font = .monospacedSystemFont(ofSize: 11, weight: .regular)
+        logLabel.textColor = .secondaryLabelColor
+        logLabel.lineBreakMode = .byCharWrapping
+        logLabel.maximumNumberOfLines = 0
+        logLabel.isSelectable = true
+
+        logScrollObserver = NotificationCenter.default.addObserver(
+            forName: NSView.boundsDidChangeNotification,
+            object: scrollView.contentView,
+            queue: .main
+        ) { [weak self] _ in
+            guard let self, !self.isUpdatingLogScroll else { return }
+            self.updateLogFollowState()
+        }
+        logLiveScrollObserver = NotificationCenter.default.addObserver(
+            forName: NSScrollView.didLiveScrollNotification,
+            object: scrollView,
+            queue: .main
+        ) { [weak self] _ in
+            self?.updateLogFollowState()
+        }
 
         emptyLabel.font = .systemFont(ofSize: 12)
         emptyLabel.textColor = .secondaryLabelColor
@@ -372,8 +420,8 @@ final class CleanupViewController: NSViewController, NSTextFieldDelegate {
     }
 
     private func applyLayout() {
-        let width = CleanupLayout.panelSize.width
-        let height = CleanupLayout.panelSize.height
+        let width = panelSize.width
+        let height = panelSize.height
         titleLabel.frame = NSRect(x: 16, y: height - 30, width: 84, height: 20)
         summaryLabel.frame = NSRect(x: 16, y: height - 50, width: width - 32, height: 18)
         ageLabel.frame = NSRect(x: 16, y: height - 78, width: 70, height: 18)
@@ -391,6 +439,11 @@ final class CleanupViewController: NSViewController, NSTextFieldDelegate {
         listView.subviews.forEach { $0.removeFromSuperview() }
         let width = max(120, scrollView.contentView.bounds.width)
         var y: CGFloat = 10
+
+        if isBusy {
+            renderLog(width: width)
+            return
+        }
 
         if let audit {
             let candidateHeader = sectionLabel("Candidates · current size / reclaim upper bound")
@@ -462,6 +515,51 @@ final class CleanupViewController: NSViewController, NSTextFieldDelegate {
         listView.frame = NSRect(x: 0, y: 0, width: width, height: max(scrollView.contentView.bounds.height, y + 12))
     }
 
+    private func renderLog(width: CGFloat) {
+        let shouldAutoScroll = shouldFollowLog
+        isUpdatingLogScroll = true
+        let text = logLines.isEmpty ? "Starting cleanup…" : logLines.joined(separator: "\n")
+        logLabel.stringValue = text
+        let logWidth = max(100, width - 32)
+        let font = logLabel.font ?? .monospacedSystemFont(ofSize: 11, weight: .regular)
+        let measuredHeight = (text as NSString).boundingRect(
+            with: NSSize(width: logWidth, height: CGFloat.greatestFiniteMagnitude),
+            options: [.usesLineFragmentOrigin, .usesFontLeading],
+            attributes: [.font: font]
+        ).height
+        logLabel.frame = NSRect(
+            x: 16,
+            y: 12,
+            width: logWidth,
+            height: max(36, ceil(measuredHeight) + 8)
+        )
+        listView.addSubview(logLabel)
+        listView.frame = NSRect(
+            x: 0,
+            y: 0,
+            width: width,
+            height: max(scrollView.contentView.bounds.height, logLabel.frame.maxY + 16)
+        )
+        guard shouldAutoScroll else {
+            isUpdatingLogScroll = false
+            return
+        }
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            defer { self.isUpdatingLogScroll = false }
+            guard self.isBusy, self.shouldFollowLog else { return }
+            self.scrollLogToEnd()
+            self.shouldFollowLog = true
+        }
+    }
+
+    private func scrollLogToEnd() {
+        guard let documentView = scrollView.documentView else { return }
+        let targetY = max(0, documentView.bounds.height - scrollView.contentView.bounds.height)
+        scrollView.contentView.scroll(to: NSPoint(x: 0, y: targetY))
+        scrollView.reflectScrolledClipView(scrollView.contentView)
+    }
+
     private func sectionLabel(_ title: String) -> NSTextField {
         let label = NSTextField(labelWithString: title)
         label.font = .systemFont(ofSize: 11, weight: .semibold)
@@ -481,9 +579,47 @@ final class CleanupViewController: NSViewController, NSTextFieldDelegate {
             guard let self, self.isBusy else { return }
             let trimmed = message.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !trimmed.isEmpty else { return }
+            self.logLines.append(trimmed)
+            if self.logLines.count > 500 {
+                self.logLines.removeFirst(self.logLines.count - 500)
+            }
             self.statusLabel.stringValue = trimmed
             self.statusLabel.toolTip = trimmed
+            self.renderContent()
         }
+    }
+
+    private func resetLog() {
+        isUpdatingLogScroll = true
+        logLines.removeAll(keepingCapacity: true)
+        shouldFollowLog = true
+        scrollView.contentView.scroll(to: .zero)
+        scrollView.reflectScrolledClipView(scrollView.contentView)
+        isUpdatingLogScroll = false
+    }
+
+    private func updateLogFollowState() {
+        guard isBusy else { return }
+        let visibleBottom = scrollView.contentView.bounds.maxY
+        let documentBottom = scrollView.documentView?.bounds.maxY ?? visibleBottom
+        shouldFollowLog = documentBottom - visibleBottom <= 18
+    }
+
+    private func setPanelHeight(_ height: CGFloat) {
+        let clampedHeight = min(CleanupLayout.maximumPanelHeight, max(CleanupLayout.minimumPanelHeight, height))
+        let newSize = NSSize(width: CleanupLayout.panelWidth, height: clampedHeight)
+        let wasUpdatingLogScroll = isUpdatingLogScroll
+        isUpdatingLogScroll = true
+        defer { isUpdatingLogScroll = wasUpdatingLogScroll }
+        guard panelSize != newSize else {
+            applyLayout()
+            return
+        }
+        panelSize = newSize
+        preferredContentSize = newSize
+        view.setFrameSize(newSize)
+        applyLayout()
+        onPreferredSizeChange?(newSize)
     }
 
     private func show(message: String, style: NSAlert.Style) {
