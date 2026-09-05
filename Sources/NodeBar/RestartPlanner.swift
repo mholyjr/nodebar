@@ -1,16 +1,57 @@
 import Foundation
 
 struct RestartPlanner {
-    func makePlan(for server: NodeServer, port: UInt16) -> RestartPlan? {
+    private let metadataReader = PackageMetadataReader()
+
+    func makePlan(for server: NodeServer, port: UInt16, scriptName: String? = nil) -> RestartPlan? {
         guard let workingDirectory = server.workingDirectory else { return nil }
-        let suggestion = makeSuggestion(for: server.command, port: port)
+
+        let package = metadataReader.read(from: workingDirectory)
+        let packageFramework = package?.metadataWarning == nil ? package?.framework : nil
+        let framework: NodeFramework
+        if let packageFramework, packageFramework != .node {
+            framework = packageFramework
+        } else {
+            framework = NodeFramework.from(command: server.command)
+        }
+        let scriptOptions = package?.metadataWarning == nil ? package?.scriptOptions ?? [] : []
+        let selectedScript = chooseScript(
+            requested: scriptName,
+            options: scriptOptions,
+            command: server.command,
+            framework: framework
+        )
+
+        let suggestion: Suggestion
+        if let package, package.metadataWarning == nil,
+           let selectedScript,
+           framework.supportsPortArgument,
+           isForwardableScript(selectedScript.command, framework: framework) {
+            let command = package.packageManager.command(for: selectedScript.name, port: port)
+            suggestion = Suggestion(
+                command: command,
+                wasInferred: true,
+                note: "From package.json · \(package.packageManager.executable) / \(selectedScript.name)"
+            )
+        } else {
+            suggestion = makeCommandSuggestion(
+                for: server.command,
+                port: port,
+                framework: framework,
+                packageWarning: package?.metadataWarning
+            )
+        }
+
         return RestartPlan(
             server: server,
             requestedPort: port,
             command: suggestion.command,
-            workingDirectory: workingDirectory,
+            workingDirectory: package?.metadataWarning == nil ? package?.rootDirectory ?? workingDirectory : workingDirectory,
             portArgumentWasInferred: suggestion.wasInferred,
             inferenceNote: suggestion.note,
+            framework: framework,
+            selectedScriptName: selectedScript?.name,
+            scriptOptions: scriptOptions,
             usePortEnvironment: false
         )
     }
@@ -25,15 +66,35 @@ struct RestartPlanner {
         let note: String
     }
 
-    private func makeSuggestion(for originalCommand: String, port: UInt16) -> Suggestion {
-        let tokens = tokenize(originalCommand)
-        guard let tool = tokens.prefix(6).compactMap(toolName(from:)).first else {
-            return Suggestion(
-                command: "",
-                wasInferred: false,
-                note: "NodeBar could not safely infer a restart command. Enter the command you use to start this server."
-            )
+    private func chooseScript(
+        requested: String?,
+        options: [PackageScript],
+        command: String,
+        framework: NodeFramework
+    ) -> PackageScript? {
+        if let requested, let match = options.first(where: { $0.name == requested }) {
+            return match
         }
+        guard !options.isEmpty else { return nil }
+
+        let lowercased = command.lowercased()
+        if let token = framework.commandToken {
+            if lowercased.contains("\(token) start"), let start = options.first(where: { $0.name == "start" }) {
+                return start
+            }
+            if lowercased.contains("\(token) dev"), let dev = options.first(where: { $0.name == "dev" }) {
+                return dev
+            }
+        }
+        return options.first
+    }
+
+    private func makeCommandSuggestion(
+        for originalCommand: String,
+        port: UInt16,
+        framework: NodeFramework,
+        packageWarning: String?
+    ) -> Suggestion {
         guard isShellSafe(originalCommand) else {
             return Suggestion(
                 command: "",
@@ -42,16 +103,21 @@ struct RestartPlanner {
             )
         }
 
-        let updated = replacePortFlag(in: originalCommand, port: port)
-        let note: String
-        switch tool {
-        case "vite":
-            note = "Vite CLI detected. NodeBar prepared a suggested --port argument; review it before restarting."
-        case "next":
-            note = "Next CLI detected. NodeBar prepared a suggested --port argument; review it before restarting."
-        default:
-            note = ""
+        let tokens = originalCommand.split(whereSeparator: \.isWhitespace).map(String.init)
+        guard let tool = tokens.prefix(6).compactMap(toolName(from:)).first else {
+            let note: String
+            if let packageWarning {
+                note = "\(packageWarning) Enter and review the command used to start this server."
+            } else if framework.supportsPortArgument {
+                note = "\(framework.displayName) was detected, but no package script was available. Enter and review the command used to start this server."
+            } else {
+                note = "NodeBar could not safely infer a restart command. Enter the command you use to start this server."
+            }
+            return Suggestion(command: "", wasInferred: false, note: note)
         }
+
+        let updated = replacePortFlag(in: originalCommand, port: port)
+        let note = "\(tool.capitalized) CLI detected. NodeBar prepared a suggested --port argument; review it before restarting."
         return Suggestion(command: updated, wasInferred: true, note: note)
     }
 
@@ -59,12 +125,10 @@ struct RestartPlanner {
         let lowercased = token.lowercased()
         guard !lowercased.hasPrefix("-") else { return nil }
         let basename = URL(fileURLWithPath: lowercased).lastPathComponent
-        if basename == "vite" || basename == "vite.js" {
-            return "vite"
-        }
-        if basename == "next" || basename == "next.js" {
-            return "next"
-        }
+        if basename == "vite" || basename == "vite.js" { return "vite" }
+        if basename == "next" || basename == "next.js" { return "next" }
+        if basename == "nuxt" || basename == "nuxt.js" { return "nuxt" }
+        if basename == "astro" || basename == "astro.js" { return "astro" }
         return nil
     }
 
@@ -78,49 +142,19 @@ struct RestartPlanner {
         return command.replacingCharacters(in: range, with: "\(prefix)\(port)")
     }
 
+    private func isForwardableScript(_ command: String, framework: NodeFramework) -> Bool {
+        guard isShellSafe(command), let token = framework.commandToken else { return false }
+        let commandTokens = command.split(whereSeparator: \.isWhitespace).map(String.init)
+        guard commandTokens.contains(where: { toolName(from: $0) == token }) else { return false }
+        let disallowed = Set(["concurrently", "npm-run-all", "run-p", "run-s"])
+        return !commandTokens.contains(where: { disallowed.contains(URL(fileURLWithPath: $0.lowercased()).lastPathComponent) })
+    }
+
     private func isShellSafe(_ command: String) -> Bool {
         guard !command.isEmpty else { return false }
         let unsafeCharacters = CharacterSet(charactersIn: "'\"`$;&|<>\\(){}[]*?!")
         return command.unicodeScalars.allSatisfy { scalar in
             !unsafeCharacters.contains(scalar) && !CharacterSet.controlCharacters.contains(scalar)
         }
-    }
-
-    private func tokenize(_ command: String) -> [String] {
-        var tokens: [String] = []
-        var token = ""
-        var quote: Character?
-        var escaped = false
-
-        for character in command {
-            if escaped {
-                token.append(character)
-                escaped = false
-                continue
-            }
-            if character == "\\" && quote != "'" {
-                escaped = true
-                continue
-            }
-            if let activeQuote = quote {
-                if character == activeQuote {
-                    quote = nil
-                } else {
-                    token.append(character)
-                }
-            } else if character == "'" || character == "\"" {
-                quote = character
-            } else if character.isWhitespace {
-                if !token.isEmpty {
-                    tokens.append(token)
-                    token = ""
-                }
-            } else {
-                token.append(character)
-            }
-        }
-        if escaped { token.append("\\") }
-        if !token.isEmpty { tokens.append(token) }
-        return tokens
     }
 }

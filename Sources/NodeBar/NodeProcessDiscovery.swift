@@ -14,6 +14,7 @@ struct NodeProcessDiscovery {
 
     private let runner = CommandRunner()
     private let username: String
+    private let metadataReader = PackageMetadataReader()
 
     init(username: String = NSUserName()) {
         self.username = username
@@ -45,13 +46,18 @@ struct NodeProcessDiscovery {
                 workingDirectory: workingDirectoryPath,
                 ports: listener.ports.map(\.port)
             )
+            let metadataFramework = metadataReader.read(from: URL(fileURLWithPath: workingDirectoryPath))?.framework
+            let framework = metadataFramework == nil || metadataFramework == .node
+                ? NodeFramework.from(command: command)
+                : metadataFramework ?? NodeFramework.from(command: command)
             return NodeServer(
                 pid: listener.pid,
                 command: command,
                 executablePath: executablePath,
                 workingDirectory: URL(fileURLWithPath: workingDirectoryPath),
                 ports: listener.ports,
-                identity: identity
+                identity: identity,
+                framework: framework
             )
         }
         .sorted { lhs, rhs in

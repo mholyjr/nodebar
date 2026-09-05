@@ -11,6 +11,7 @@ private enum NodeBarLayout {
 }
 
 final class NodeServerRowView: NSView {
+    private let frameworkImageView = NSImageView(frame: .zero)
     private let projectLabel = NSTextField(labelWithString: "")
     private let portsLabel = NSTextField(labelWithString: "")
     private let directoryLabel = NSTextField(labelWithString: "")
@@ -39,6 +40,7 @@ final class NodeServerRowView: NSView {
 
     func update(server: NodeServer) {
         self.server = server
+        frameworkImageView.image = NodeBarIcon.image(for: server.framework, size: 20)
         projectLabel.stringValue = server.projectName
         portsLabel.stringValue = server.ports.map { ":\($0.port)" }.joined(separator: ", ")
         directoryLabel.stringValue = server.workingDirectory?.path ?? "Working directory unavailable"
@@ -74,10 +76,12 @@ final class NodeServerRowView: NSView {
         let actionsX = max(horizontalPadding, width - horizontalPadding - actionWidth - actionGap - stopWidth)
         let contentWidth = max(80, width - (horizontalPadding * 2))
         let portWidth: CGFloat = 100
-        let projectWidth = max(60, contentWidth - portWidth - 8)
+        let projectX = horizontalPadding + 28
+        let projectWidth = max(60, contentWidth - portWidth - 28)
 
-        projectLabel.frame = NSRect(x: horizontalPadding, y: bounds.height - 28, width: projectWidth, height: 20)
-        portsLabel.frame = NSRect(x: horizontalPadding + projectWidth + 8, y: bounds.height - 28, width: portWidth, height: 20)
+        frameworkImageView.frame = NSRect(x: horizontalPadding, y: bounds.height - 30, width: 20, height: 20)
+        projectLabel.frame = NSRect(x: projectX, y: bounds.height - 28, width: projectWidth, height: 20)
+        portsLabel.frame = NSRect(x: projectX + projectWidth + 8, y: bounds.height - 28, width: portWidth, height: 20)
         directoryLabel.frame = NSRect(x: horizontalPadding, y: bounds.height - 51, width: contentWidth, height: 18)
         pidLabel.frame = NSRect(x: horizontalPadding, y: 12, width: 80, height: 18)
         stopButton.frame = NSRect(x: actionsX + actionGap + actionWidth, y: 9, width: stopWidth, height: 24)
@@ -116,6 +120,8 @@ final class NodeServerRowView: NSView {
         changePortButton.target = self
         changePortButton.action = #selector(changePortPressed)
 
+        frameworkImageView.imageScaling = .scaleProportionallyUpOrDown
+        addSubview(frameworkImageView)
         addSubview(projectLabel)
         addSubview(portsLabel)
         addSubview(directoryLabel)
@@ -129,13 +135,29 @@ private final class NodeServerListView: NSView {
     override var isFlipped: Bool { true }
 }
 
-final class RestartDialogView: NSView {
+final class RestartDialogView: NSView, NSTextFieldDelegate {
     let portField = NSTextField(string: "")
     let commandField = NSTextField(string: "")
     let portEnvironmentCheckbox = NSButton(checkboxWithTitle: "Set PORT environment variable", target: nil, action: nil)
+    private let scriptLabel = NSTextField(labelWithString: "Script")
+    private let scriptPopup = NSPopUpButton(frame: .zero, pullsDown: false)
+    private let noteLabel = NSTextField(wrappingLabelWithString: "")
+    private var suggestedCommand = ""
+
+    var onScriptChange: ((String?) -> Void)?
+    var onPortChange: ((UInt16) -> Void)?
+
+    var selectedScriptName: String? {
+        scriptPopup.selectedItem?.representedObject as? String
+    }
+
+    var suggestedCommandValue: String {
+        suggestedCommand
+    }
 
     init(plan: RestartPlan) {
-        super.init(frame: NSRect(x: 0, y: 0, width: 430, height: 260))
+        suggestedCommand = plan.command
+        super.init(frame: NSRect(x: 0, y: 0, width: 430, height: 300))
         portField.stringValue = String(plan.requestedPort)
         commandField.stringValue = plan.command
         setup(plan: plan)
@@ -145,50 +167,96 @@ final class RestartDialogView: NSView {
         fatalError("NodeBar dialogs are created programmatically")
     }
 
+    func apply(plan: RestartPlan) {
+        if commandField.stringValue == suggestedCommand {
+            commandField.stringValue = plan.command
+        }
+        suggestedCommand = plan.command
+        noteLabel.stringValue = noteText(for: plan)
+    }
+
+    @objc private func scriptChanged() {
+        onScriptChange?(selectedScriptName)
+    }
+
+    @objc private func portChanged() {
+        guard let port = UInt16(portField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)), port > 0 else { return }
+        onPortChange?(port)
+    }
+
+    func controlTextDidChange(_ notification: Notification) {
+        guard notification.object as AnyObject? === portField else { return }
+        portChanged()
+    }
+
     private func setup(plan: RestartPlan) {
+        let hasScriptSelector = plan.scriptOptions.count > 1
         let portLabel = NSTextField(labelWithString: "New port")
         portLabel.font = .systemFont(ofSize: 12, weight: .semibold)
-        portLabel.frame = NSRect(x: 0, y: 230, width: 100, height: 18)
+        portLabel.frame = NSRect(x: 0, y: 276, width: 100, height: 18)
 
         portField.font = .monospacedSystemFont(ofSize: 13, weight: .regular)
         portField.controlSize = .regular
         portField.placeholderString = "1–65535"
-        portField.frame = NSRect(x: 0, y: 200, width: 100, height: 24)
+        portField.delegate = self
+        portField.target = self
+        portField.action = #selector(portChanged)
+        portField.frame = NSRect(x: 0, y: 246, width: 100, height: 24)
+
+        scriptLabel.font = .systemFont(ofSize: 12, weight: .semibold)
+        scriptLabel.frame = NSRect(x: 0, y: 214, width: 100, height: 18)
+        scriptLabel.isHidden = !hasScriptSelector
+        scriptPopup.removeAllItems()
+        for option in plan.scriptOptions {
+            scriptPopup.addItem(withTitle: option.name)
+            scriptPopup.lastItem?.representedObject = option.name
+        }
+        if let selected = plan.selectedScriptName {
+            scriptPopup.selectItem(withTitle: selected)
+        }
+        scriptPopup.target = self
+        scriptPopup.action = #selector(scriptChanged)
+        scriptPopup.isHidden = !hasScriptSelector
+        scriptPopup.frame = NSRect(x: 0, y: 181, width: 210, height: 24)
 
         let commandLabel = NSTextField(labelWithString: "Restart command")
         commandLabel.font = .systemFont(ofSize: 12, weight: .semibold)
-        commandLabel.frame = NSRect(x: 0, y: 169, width: 180, height: 18)
+        commandLabel.frame = NSRect(x: 0, y: hasScriptSelector ? 149 : 214, width: 180, height: 18)
 
         commandField.font = .monospacedSystemFont(ofSize: 11, weight: .regular)
         commandField.placeholderString = "Enter a command, for example: npm run dev"
         commandField.usesSingleLineMode = true
         commandField.lineBreakMode = .byTruncatingMiddle
-        commandField.frame = NSRect(x: 0, y: 137, width: 430, height: 24)
+        commandField.frame = NSRect(x: 0, y: hasScriptSelector ? 117 : 181, width: 430, height: 24)
 
         let directoryLabel = NSTextField(wrappingLabelWithString: "Working directory: \(plan.workingDirectory.path)")
         directoryLabel.font = .systemFont(ofSize: 11)
         directoryLabel.textColor = .secondaryLabelColor
-        directoryLabel.frame = NSRect(x: 0, y: 95, width: 430, height: 34)
-
-        let note = plan.inferenceNote.isEmpty
-            ? "NodeBar uses a login zsh environment; the original process environment is not copied."
-            : "\(plan.inferenceNote) NodeBar uses a login zsh environment; the original process environment is not copied."
-        let noteLabel = NSTextField(wrappingLabelWithString: note)
-        noteLabel.font = .systemFont(ofSize: 11)
-        noteLabel.textColor = .secondaryLabelColor
-        noteLabel.frame = NSRect(x: 0, y: 0, width: 430, height: 46)
+        directoryLabel.frame = NSRect(x: 0, y: hasScriptSelector ? 72 : 118, width: 430, height: 36)
 
         portEnvironmentCheckbox.font = .systemFont(ofSize: 11)
         portEnvironmentCheckbox.toolTip = "Some frameworks read PORT; others ignore it."
-        portEnvironmentCheckbox.frame = NSRect(x: 0, y: 64, width: 260, height: 22)
+        portEnvironmentCheckbox.frame = NSRect(x: 0, y: hasScriptSelector ? 43 : 82, width: 260, height: 22)
+
+        noteLabel.font = .systemFont(ofSize: 11)
+        noteLabel.textColor = .secondaryLabelColor
+        noteLabel.frame = NSRect(x: 0, y: 0, width: 430, height: hasScriptSelector ? 38 : 72)
+        noteLabel.stringValue = noteText(for: plan)
 
         addSubview(portLabel)
         addSubview(portField)
+        addSubview(scriptLabel)
+        addSubview(scriptPopup)
         addSubview(commandLabel)
         addSubview(commandField)
         addSubview(directoryLabel)
         addSubview(portEnvironmentCheckbox)
         addSubview(noteLabel)
+    }
+
+    private func noteText(for plan: RestartPlan) -> String {
+        let environmentNote = "Uses login-shell environment; original env is not copied."
+        return plan.inferenceNote.isEmpty ? environmentNote : "\(plan.inferenceNote)\n\(environmentNote)"
     }
 }
 
@@ -386,9 +454,21 @@ final class NodeBarViewController: NSViewController {
             return
         }
         let dialogView = RestartDialogView(plan: initialPlan)
+        dialogView.onScriptChange = { [weak dialogView] scriptName in
+            guard let dialogView,
+                  let port = UInt16(dialogView.portField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)),
+                  let plan = self.planner.makePlan(for: server, port: port, scriptName: scriptName) else { return }
+            dialogView.apply(plan: plan)
+        }
+        dialogView.onPortChange = { [weak dialogView] port in
+            guard let dialogView,
+                  let plan = self.planner.makePlan(for: server, port: port, scriptName: dialogView.selectedScriptName) else { return }
+            dialogView.apply(plan: plan)
+        }
         let alert = NSAlert()
         alert.messageText = "Change port for \(server.projectName)"
         alert.informativeText = "NodeBar will stop PID \(server.pid), then start the reviewed command on the new port."
+        alert.icon = NodeBarIcon.image(for: initialPlan.framework, size: 64)
         alert.accessoryView = dialogView
         alert.addButton(withTitle: "Restart")
         alert.addButton(withTitle: "Cancel")
@@ -400,17 +480,18 @@ final class NodeBarViewController: NSViewController {
             return
         }
         let editedCommand = dialogView.commandField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        var command = editedCommand
-        if initialPlan.portArgumentWasInferred, editedCommand == initialPlan.command {
-            command = planner.commandByUpdatingKnownPort(editedCommand, port: port)
-        }
+        let suggestedPlan = planner.makePlan(for: server, port: port, scriptName: dialogView.selectedScriptName) ?? initialPlan
+        let command = editedCommand == dialogView.suggestedCommandValue ? suggestedPlan.command : editedCommand
         let plan = RestartPlan(
             server: server,
             requestedPort: port,
             command: command,
-            workingDirectory: initialPlan.workingDirectory,
-            portArgumentWasInferred: initialPlan.portArgumentWasInferred,
-            inferenceNote: initialPlan.inferenceNote,
+            workingDirectory: suggestedPlan.workingDirectory,
+            portArgumentWasInferred: suggestedPlan.portArgumentWasInferred,
+            inferenceNote: suggestedPlan.inferenceNote,
+            framework: suggestedPlan.framework,
+            selectedScriptName: suggestedPlan.selectedScriptName,
+            scriptOptions: suggestedPlan.scriptOptions,
             usePortEnvironment: dialogView.portEnvironmentCheckbox.state == .on
         )
 
@@ -465,6 +546,7 @@ final class NodeBarViewController: NSViewController {
 
     private func askToForceKill(pid: Int32) -> Bool {
         let alert = NSAlert()
+        alert.icon = NodeBarIcon.image(for: .node, size: 64)
         alert.messageText = "PID \(pid) did not stop"
         alert.informativeText = "SIGTERM was sent, but the process is still alive. Force Kill sends SIGKILL after checking that the same process is still running."
         alert.addButton(withTitle: "Cancel")
@@ -475,6 +557,7 @@ final class NodeBarViewController: NSViewController {
 
     private func show(error: ProcessActionError) {
         let alert = NSAlert()
+        alert.icon = NodeBarIcon.image(for: .node, size: 64)
         alert.messageText = "NodeBar could not complete that action"
         alert.informativeText = error.localizedDescription
         alert.alertStyle = .warning

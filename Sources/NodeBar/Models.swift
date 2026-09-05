@@ -26,6 +26,7 @@ struct NodeServer: Identifiable, Hashable {
     let workingDirectory: URL?
     let ports: [PortBinding]
     let identity: ProcessIdentity
+    let framework: NodeFramework
 
     var id: String {
         String(pid)
@@ -50,6 +51,9 @@ struct RestartPlan {
     let workingDirectory: URL
     let portArgumentWasInferred: Bool
     let inferenceNote: String
+    let framework: NodeFramework
+    let selectedScriptName: String?
+    let scriptOptions: [PackageScript]
     var usePortEnvironment: Bool
 
     var commandForLaunch: String {
