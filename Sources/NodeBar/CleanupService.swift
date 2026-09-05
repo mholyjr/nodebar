@@ -232,12 +232,16 @@ final class CleanupService {
                     completion(.failure(.cancelled))
                     return
                 }
-                guard processResult.status == 0 else {
+                guard processResult.status == 0 || processResult.status == 1 else {
                     completion(.failure(.processFailed(processResult.status, Self.errorTail(processResult.stderr))))
                     return
                 }
                 do {
                     let run = try Self.parseRun(processResult.stdoutLines, expectedKeys: Set(keys))
+                    if processResult.status == 1 && run.failedCount == 0 {
+                        completion(.failure(.processFailed(processResult.status, Self.errorTail(processResult.stderr))))
+                        return
+                    }
                     completion(.success(run))
                 } catch let error as CleanupServiceError {
                     completion(.failure(error))
@@ -468,6 +472,9 @@ final class CleanupService {
             }
         }
         guard let summary else { throw CleanupServiceError.invalidProtocol("missing apply summary") }
+        guard summary.0 == expectedKeys.count else {
+            throw CleanupServiceError.invalidProtocol("apply selected count does not match requested candidates")
+        }
         let resultKeys = Set(results.map(\.key))
         guard expectedKeys.isSubset(of: resultKeys) else {
             throw CleanupServiceError.invalidProtocol("apply result omitted a selected candidate")
