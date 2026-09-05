@@ -8,7 +8,7 @@ It is dependency-free, runs as a menu bar accessory, and does not add a Dock ico
 
 - macOS 13 or newer
 - Xcode 26 or the Xcode 26 Command Line Tools, providing Swift 6.2 and the macOS 26 SDK for the build
-- `lsof` for listener discovery; the Cleanup tab also uses the system `git` command and the package-manager tools available on the machine when their caches are selected
+- `lsof` for listener discovery
 
 On macOS 26 and newer the panel uses `NSGlassEffectView` for the system glass treatment. On macOS 13–25 it uses the compatible popover visual-effect material, while keeping the same native controls and layout.
 
@@ -35,8 +35,6 @@ The build script creates and ad-hoc signs `NodeBar.app` for local use.
 - Stops a selected PID with `SIGTERM`, then offers an explicit `SIGKILL` after another identity check if it does not exit.
 - Validates a new port and the original process identity before a restart.
 - Shows the project directory and keeps the full command available in the row tooltip.
-- Provides a Cleanup tab with a 30-day default age threshold, a Preview step, and an explicit selected Clean action. The bundled script revalidates selections and repository state before deletion; reported cache sizes are upper-bound estimates.
-- Shows the cleanup script's live progress in a bounded scrolling log during Scan and Clean, then returns to the completed preview and results.
 
 ## Changing ports
 
@@ -50,11 +48,7 @@ The optional `PORT` setting is opt-in and only works when the framework reads th
 
 Restart output is appended to `~/Library/Logs/NodeBar/restarts.log` when a command needs investigation. NodeBar sends signals only to the selected PID and never to a process group.
 
-## Cleanup
-
-The Cleanup tab runs the bundled `agent-junk-clean` script. It previews stale Git worktrees, project dependencies, and renewable caches before an explicit selection is applied. Cleanup is limited to the current user's files and does not require administrator access. Cancel a scan before quitting; NodeBar keeps itself open while an audit or cleanup is running.
-
-The safety path is deliberately narrow: listener actions revalidate the selected process identity and port availability immediately before mutation, signals target one PID, and cleanup selections are previewed and revalidated by the bundled script before deletion. NodeBar never starts saved servers automatically when the app launches.
+NodeBar revalidates the selected process identity and port availability immediately before mutation, sends signals only to the selected PID, and never starts saved servers automatically when the app launches.
 
 ## Command-line listing
 
