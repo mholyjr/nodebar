@@ -8,6 +8,10 @@
     <string>NodeBar</string>
     <key>CFBundleIdentifier</key>
     <string>com.mholyjr.nodebar</string>
+    <key>CFBundleIconFile</key>
+    <string>NodeBar</string>
+    <key>CFBundleIconName</key>
+    <string>NodeBar</string>
     <key>CFBundleInfoDictionaryVersion</key>
     <string>6.0</string>
     <key>CFBundleName</key>
