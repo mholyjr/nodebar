@@ -86,18 +86,21 @@ final class ProcessActionService {
     ) {
         DispatchQueue.global(qos: .userInitiated).async {
             do {
-                try self.validateCommand(plan.command)
-                try self.validatePort(plan.requestedPort, excluding: plan.server.pid)
-                try self.validateWorkingDirectory(plan.workingDirectory)
-                guard let current = try self.discovery.discover().first(where: { $0.pid == plan.server.pid }) else {
+                guard let server = plan.server else {
                     throw ProcessActionError.staleProcess
                 }
-                guard self.matches(plan.server.identity, current.identity, includePorts: true) else {
+                try self.validateCommand(plan.command)
+                try self.validatePort(plan.requestedPort, excluding: server.pid)
+                try self.validateWorkingDirectory(plan.workingDirectory)
+                guard let current = try self.discovery.discover().first(where: { $0.pid == server.pid }) else {
+                    throw ProcessActionError.staleProcess
+                }
+                guard self.matches(server.identity, current.identity, includePorts: true) else {
                     throw ProcessActionError.staleProcess
                 }
 
-                try self.send(signal: SIGTERM, to: plan.server.pid, name: "SIGTERM")
-                guard self.waitUntilGone(pid: plan.server.pid, timeout: 3.0) else {
+                try self.send(signal: SIGTERM, to: server.pid, name: "SIGTERM")
+                guard self.waitUntilGone(pid: server.pid, timeout: 3.0) else {
                     self.finish(completion, with: .success(.needsForceKill))
                     return
                 }
@@ -110,8 +113,8 @@ final class ProcessActionService {
                     throw ProcessActionError.restartLaunchFailed(error.localizedDescription)
                 }
 
-                let verification = try self.verify(plan: plan)
-                self.finish(completion, with: verification)
+                _ = try self.verify(plan: plan)
+                self.finish(completion, with: .success(.stopped))
             } catch let error as ProcessActionError {
                 self.finish(completion, with: .failure(error))
             } catch {
@@ -126,27 +129,50 @@ final class ProcessActionService {
     ) {
         DispatchQueue.global(qos: .userInitiated).async {
             do {
+                guard let server = plan.server else {
+                    throw ProcessActionError.staleProcess
+                }
                 try self.validateCommand(plan.command)
-                try self.validatePort(plan.requestedPort, excluding: plan.server.pid)
+                try self.validatePort(plan.requestedPort, excluding: server.pid)
                 try self.validateWorkingDirectory(plan.workingDirectory)
-                guard let current = try self.discovery.identity(for: plan.server.pid) else {
+                guard let current = try self.discovery.identity(for: server.pid) else {
                     throw ProcessActionError.staleProcess
                 }
-                guard self.matches(plan.server.identity, current, includePorts: false) else {
+                guard self.matches(server.identity, current, includePorts: false) else {
                     throw ProcessActionError.staleProcess
                 }
-                try self.send(signal: SIGKILL, to: plan.server.pid, name: "SIGKILL")
-                guard self.waitUntilGone(pid: plan.server.pid, timeout: 2.0) else {
+                try self.send(signal: SIGKILL, to: server.pid, name: "SIGKILL")
+                guard self.waitUntilGone(pid: server.pid, timeout: 2.0) else {
                     throw ProcessActionError.signalFailed(
-                        pid: plan.server.pid,
+                        pid: server.pid,
                         signal: "SIGKILL",
                         reason: "the process is still alive"
                     )
                 }
 
                 try self.launch(plan: plan)
-                let verification = try self.verify(plan: plan)
-                self.finish(completion, with: verification)
+                _ = try self.verify(plan: plan)
+                self.finish(completion, with: .success(.stopped))
+            } catch let error as ProcessActionError {
+                self.finish(completion, with: .failure(error))
+            } catch {
+                self.finish(completion, with: .failure(.discoveryFailed(error.localizedDescription)))
+            }
+        }
+    }
+
+    func start(
+        plan: RestartPlan,
+        completion: @escaping (Result<NodeServer, ProcessActionError>) -> Void
+    ) {
+        DispatchQueue.global(qos: .userInitiated).async {
+            do {
+                try self.validateCommand(plan.command)
+                try self.validatePort(plan.requestedPort, excluding: 0)
+                try self.validateWorkingDirectory(plan.workingDirectory)
+                try self.launch(plan: plan)
+                let server = try self.verify(plan: plan)
+                self.finish(completion, with: .success(server))
             } catch let error as ProcessActionError {
                 self.finish(completion, with: .failure(error))
             } catch {
@@ -156,6 +182,7 @@ final class ProcessActionService {
     }
 
     private func validatePort(_ port: UInt16, excluding pid: Int32) throws {
+        guard port > 0 else { throw ProcessActionError.invalidPort }
         let output = try runner.run(
             executablePath: "/usr/sbin/lsof",
             arguments: ["-nP", "-a", "-iTCP:\(port)", "-sTCP:LISTEN", "-Fpn"]
@@ -220,7 +247,7 @@ final class ProcessActionService {
         }
     }
 
-    private func verify(plan: RestartPlan) throws -> Result<StopOutcome, ProcessActionError> {
+    private func verify(plan: RestartPlan) throws -> NodeServer {
         var sawPort = false
         for _ in 0..<32 {
             let servers: [NodeServer]
@@ -233,12 +260,12 @@ final class ProcessActionService {
                 server.ports.contains { $0.port == plan.requestedPort }
             }
             sawPort = sawPort || !listeners.isEmpty
-            if listeners.contains(where: { $0.workingDirectory?.standardizedFileURL == plan.workingDirectory.standardizedFileURL }) {
-                return .success(.stopped)
+            if let match = listeners.first(where: { $0.workingDirectory?.standardizedFileURL == plan.workingDirectory.standardizedFileURL }) {
+                return match
             }
             usleep(250_000)
         }
-        return .failure(sawPort ? .verificationFailed(plan.requestedPort) : .restartTimedOut(plan.requestedPort))
+        throw sawPort ? ProcessActionError.verificationFailed(plan.requestedPort) : ProcessActionError.restartTimedOut(plan.requestedPort)
     }
 
     private func send(signal: Int32, to pid: Int32, name: String) throws {

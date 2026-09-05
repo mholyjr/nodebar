@@ -6,6 +6,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private lazy var actionService = ProcessActionService(discovery: discovery)
     private var statusItem: NSStatusItem?
     private var popover: NSPopover?
+    private var rootViewController: NodeBarRootViewController?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
@@ -21,16 +22,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         item.button?.action = #selector(togglePopover)
         statusItem = item
 
-        let viewController = NodeBarViewController(store: store, actionService: actionService)
+        let serversController = NodeBarViewController(store: store, actionService: actionService)
+        let cleanupController = CleanupViewController()
+        let viewController = NodeBarRootViewController(
+            serversController: serversController,
+            cleanupController: cleanupController
+        )
         let nodePopover = NSPopover()
         nodePopover.contentViewController = viewController
-        nodePopover.contentSize = NSSize(width: 400, height: 180)
+        nodePopover.contentSize = viewController.preferredContentSize
         nodePopover.behavior = .transient
         nodePopover.animates = true
         viewController.onPreferredSizeChange = { [weak nodePopover] size in
             nodePopover?.contentSize = size
         }
         popover = nodePopover
+        rootViewController = viewController
 
         store.start()
     }
@@ -47,5 +54,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationWillTerminate(_ notification: Notification) {
         store.stop()
+    }
+
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        guard rootViewController?.hasRunningCleanupOperation == true else {
+            return .terminateNow
+        }
+
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.icon = NodeBarIcon.image(for: .node, size: 56)
+        alert.messageText = "Cleanup is still running"
+        alert.informativeText = "Wait for it to finish, or cancel the scan in Cleanup."
+        alert.addButton(withTitle: "Keep NodeBar Open")
+        NSApp.activate(ignoringOtherApps: true)
+        alert.runModal()
+        return .terminateCancel
     }
 }

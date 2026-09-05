@@ -45,7 +45,7 @@ struct NodeServer: Identifiable, Hashable {
 }
 
 struct RestartPlan {
-    let server: NodeServer
+    let server: NodeServer?
     let requestedPort: UInt16
     let command: String
     let workingDirectory: URL

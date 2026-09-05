@@ -3,22 +3,94 @@ import Foundation
 struct RestartPlanner {
     private let metadataReader = PackageMetadataReader()
 
+    func makePlan(for profile: ServerProfile, liveServer: NodeServer? = nil) -> RestartPlan? {
+        guard let directory = profile.directoryURL else { return nil }
+        let details = makePlanDetails(
+            command: profile.command,
+            workingDirectory: directory,
+            port: profile.preferredPort,
+            scriptName: profile.scriptName,
+            fallbackFramework: profile.framework
+        )
+
+        return RestartPlan(
+            server: liveServer,
+            requestedPort: profile.preferredPort,
+            command: profile.inferredCommand ? details.suggestion.command : profile.command,
+            workingDirectory: details.workingDirectory,
+            portArgumentWasInferred: profile.inferredCommand && details.suggestion.wasInferred,
+            inferenceNote: profile.inferredCommand ? details.suggestion.note : "Saved command; review it before starting.",
+            framework: details.framework,
+            selectedScriptName: profile.scriptName ?? details.selectedScriptName,
+            scriptOptions: details.scriptOptions,
+            usePortEnvironment: profile.usePortEnvironment
+        )
+    }
+
     func makePlan(for server: NodeServer, port: UInt16, scriptName: String? = nil) -> RestartPlan? {
         guard let workingDirectory = server.workingDirectory else { return nil }
+        let details = makePlanDetails(
+            command: server.command,
+            workingDirectory: workingDirectory,
+            port: port,
+            scriptName: scriptName,
+            fallbackFramework: nil
+        )
 
+        return RestartPlan(
+            server: server,
+            requestedPort: port,
+            command: details.suggestion.command,
+            workingDirectory: details.workingDirectory,
+            portArgumentWasInferred: details.suggestion.wasInferred,
+            inferenceNote: details.suggestion.note,
+            framework: details.framework,
+            selectedScriptName: details.selectedScriptName,
+            scriptOptions: details.scriptOptions,
+            usePortEnvironment: false
+        )
+    }
+
+    func commandByUpdatingKnownPort(_ command: String, port: UInt16) -> String {
+        replacePortFlag(in: command, port: port)
+    }
+
+    private struct Suggestion {
+        let command: String
+        let wasInferred: Bool
+        let note: String
+    }
+
+    private struct PlanDetails {
+        let workingDirectory: URL
+        let framework: NodeFramework
+        let selectedScriptName: String?
+        let scriptOptions: [PackageScript]
+        let suggestion: Suggestion
+    }
+
+    private func makePlanDetails(
+        command: String,
+        workingDirectory: URL,
+        port: UInt16,
+        scriptName: String?,
+        fallbackFramework: NodeFramework?
+    ) -> PlanDetails {
         let package = metadataReader.read(from: workingDirectory)
         let packageFramework = package?.metadataWarning == nil ? package?.framework : nil
         let framework: NodeFramework
         if let packageFramework, packageFramework != .node {
             framework = packageFramework
+        } else if let fallbackFramework {
+            framework = fallbackFramework
         } else {
-            framework = NodeFramework.from(command: server.command)
+            framework = NodeFramework.from(command: command)
         }
         let scriptOptions = package?.metadataWarning == nil ? package?.scriptOptions ?? [] : []
         let selectedScript = chooseScript(
             requested: scriptName,
             options: scriptOptions,
-            command: server.command,
+            command: command,
             framework: framework
         )
 
@@ -35,35 +107,20 @@ struct RestartPlanner {
             )
         } else {
             suggestion = makeCommandSuggestion(
-                for: server.command,
+                for: command,
                 port: port,
                 framework: framework,
                 packageWarning: package?.metadataWarning
             )
         }
 
-        return RestartPlan(
-            server: server,
-            requestedPort: port,
-            command: suggestion.command,
+        return PlanDetails(
             workingDirectory: package?.metadataWarning == nil ? package?.rootDirectory ?? workingDirectory : workingDirectory,
-            portArgumentWasInferred: suggestion.wasInferred,
-            inferenceNote: suggestion.note,
             framework: framework,
             selectedScriptName: selectedScript?.name,
             scriptOptions: scriptOptions,
-            usePortEnvironment: false
+            suggestion: suggestion
         )
-    }
-
-    func commandByUpdatingKnownPort(_ command: String, port: UInt16) -> String {
-        replacePortFlag(in: command, port: port)
-    }
-
-    private struct Suggestion {
-        let command: String
-        let wasInferred: Bool
-        let note: String
     }
 
     private func chooseScript(
