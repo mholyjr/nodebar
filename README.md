@@ -10,6 +10,8 @@ It is dependency-free, runs as a menu bar accessory, and does not add a Dock ico
 - Swift 5.10 or newer with the Xcode Command Line Tools
 - `lsof` for listener discovery; the Cleanup tab also uses the system `git` command and the package-manager tools available on the machine when their caches are selected
 
+On macOS 26 and newer the panel uses `NSGlassEffectView` for the system glass treatment. On macOS 13–25 it uses the compatible popover visual-effect material, while keeping the same native controls and layout.
+
 ## Build and run
 
 ```sh
@@ -34,6 +36,7 @@ The build script creates and ad-hoc signs `NodeBar.app` for local use.
 - Validates a new port and the original process identity before a restart.
 - Shows the project directory and keeps the full command available in the row tooltip.
 - Provides a Cleanup tab with a 30-day default age threshold, a Preview step, and an explicit selected Clean action. The bundled script revalidates selections and repository state before deletion; reported cache sizes are upper-bound estimates.
+- Shows the cleanup script's live progress in a bounded scrolling log during Scan and Clean, then returns to the completed preview and results.
 
 ## Changing ports
 
@@ -50,6 +53,8 @@ Restart output is appended to `~/Library/Logs/NodeBar/restarts.log` when a comma
 ## Cleanup
 
 The Cleanup tab runs the bundled `agent-junk-clean` script. It previews stale Git worktrees, project dependencies, and renewable caches before an explicit selection is applied. Cleanup is limited to the current user's files and does not require administrator access. Cancel a scan before quitting; NodeBar keeps itself open while an audit or cleanup is running.
+
+The safety path is deliberately narrow: listener actions revalidate the selected process identity and port availability immediately before mutation, signals target one PID, and cleanup selections are previewed and revalidated by the bundled script before deletion. NodeBar never starts saved servers automatically when the app launches.
 
 ## Command-line listing
 

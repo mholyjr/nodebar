@@ -134,9 +134,6 @@ final class NodeServerRowView: NSView {
     }
 
     private func setup() {
-        wantsLayer = true
-        layer?.backgroundColor = NSColor.controlBackgroundColor.withAlphaComponent(0.25).cgColor
-
         projectLabel.font = .systemFont(ofSize: 13, weight: .semibold)
         projectLabel.lineBreakMode = .byTruncatingTail
         projectLabel.maximumNumberOfLines = 1
