@@ -1,10 +1,20 @@
 import AppKit
 
+private enum NodeBarLayout {
+    static let panelWidth: CGFloat = 400
+    static let headerHeight: CGFloat = 42
+    static let footerHeight: CGFloat = 40
+    static let rowHeight: CGFloat = 88
+    static let emptyListHeight: CGFloat = 92
+    static let minimumPanelHeight: CGFloat = 180
+    static let maximumPanelHeight: CGFloat = 450
+}
+
 final class NodeServerRowView: NSView {
     private let projectLabel = NSTextField(labelWithString: "")
     private let portsLabel = NSTextField(labelWithString: "")
     private let directoryLabel = NSTextField(labelWithString: "")
-    private let commandLabel = NSTextField(labelWithString: "")
+    private let pidLabel = NSTextField(labelWithString: "")
     private let stopButton = NSButton(title: "Stop", target: nil, action: nil)
     private let changePortButton = NSButton(title: "Change port…", target: nil, action: nil)
     private var server: NodeServer
@@ -23,13 +33,22 @@ final class NodeServerRowView: NSView {
         fatalError("NodeBar rows are created programmatically")
     }
 
+    override var intrinsicContentSize: NSSize {
+        NSSize(width: NSView.noIntrinsicMetric, height: NodeBarLayout.rowHeight)
+    }
+
     func update(server: NodeServer) {
         self.server = server
         projectLabel.stringValue = server.projectName
-        portsLabel.stringValue = "PID \(server.pid) · \(server.portSummary)"
+        portsLabel.stringValue = server.ports.map { ":\($0.port)" }.joined(separator: ", ")
         directoryLabel.stringValue = server.workingDirectory?.path ?? "Working directory unavailable"
-        commandLabel.stringValue = server.command
+        pidLabel.stringValue = "PID \(server.pid)"
+        directoryLabel.toolTip = server.workingDirectory?.path
+        projectLabel.toolTip = "Command: \(server.command)"
+        portsLabel.toolTip = "Listening on \(server.portSummary)"
         stopButton.toolTip = "Send SIGTERM to PID \(server.pid)"
+        toolTip = "Command: \(server.command)"
+        needsLayout = true
     }
 
     func setBusy(_ busy: Bool) {
@@ -45,77 +64,69 @@ final class NodeServerRowView: NSView {
         onChangePort?(server)
     }
 
-    private func setup() {
-        translatesAutoresizingMaskIntoConstraints = false
-        let contentStack = NSStackView()
-        contentStack.orientation = .vertical
-        contentStack.alignment = .leading
-        contentStack.spacing = 3
-        contentStack.translatesAutoresizingMaskIntoConstraints = false
+    override func layout() {
+        super.layout()
+        let width = bounds.width
+        let horizontalPadding: CGFloat = 12
+        let actionWidth: CGFloat = 112
+        let stopWidth: CGFloat = 54
+        let actionGap: CGFloat = 6
+        let actionsX = max(horizontalPadding, width - horizontalPadding - actionWidth - actionGap - stopWidth)
+        let contentWidth = max(80, width - (horizontalPadding * 2))
+        let portWidth: CGFloat = 100
+        let projectWidth = max(60, contentWidth - portWidth - 8)
 
-        let titleStack = NSStackView()
-        titleStack.orientation = .horizontal
-        titleStack.alignment = .centerY
-        titleStack.spacing = 8
+        projectLabel.frame = NSRect(x: horizontalPadding, y: bounds.height - 28, width: projectWidth, height: 20)
+        portsLabel.frame = NSRect(x: horizontalPadding + projectWidth + 8, y: bounds.height - 28, width: portWidth, height: 20)
+        directoryLabel.frame = NSRect(x: horizontalPadding, y: bounds.height - 51, width: contentWidth, height: 18)
+        pidLabel.frame = NSRect(x: horizontalPadding, y: 12, width: 80, height: 18)
+        stopButton.frame = NSRect(x: actionsX + actionGap + actionWidth, y: 9, width: stopWidth, height: 24)
+        changePortButton.frame = NSRect(x: actionsX, y: 9, width: actionWidth, height: 24)
+    }
+
+    private func setup() {
+        wantsLayer = true
+        layer?.backgroundColor = NSColor.controlBackgroundColor.withAlphaComponent(0.25).cgColor
 
         projectLabel.font = .systemFont(ofSize: 13, weight: .semibold)
-        projectLabel.setContentHuggingPriority(.defaultLow, for: .horizontal)
-        projectLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        portsLabel.font = .monospacedSystemFont(ofSize: 11, weight: .regular)
-        portsLabel.textColor = .secondaryLabelColor
-        portsLabel.setContentHuggingPriority(.required, for: .horizontal)
-        titleStack.addArrangedSubview(projectLabel)
-        titleStack.addArrangedSubview(portsLabel)
+        projectLabel.lineBreakMode = .byTruncatingTail
+        projectLabel.maximumNumberOfLines = 1
+
+        portsLabel.font = .monospacedSystemFont(ofSize: 11, weight: .medium)
+        portsLabel.textColor = .controlAccentColor
+        portsLabel.alignment = .right
+        portsLabel.lineBreakMode = .byTruncatingHead
+        portsLabel.maximumNumberOfLines = 1
 
         directoryLabel.font = .systemFont(ofSize: 11)
         directoryLabel.textColor = .secondaryLabelColor
         directoryLabel.lineBreakMode = .byTruncatingMiddle
         directoryLabel.maximumNumberOfLines = 1
 
-        commandLabel.font = .monospacedSystemFont(ofSize: 10, weight: .regular)
-        commandLabel.textColor = .tertiaryLabelColor
-        commandLabel.lineBreakMode = .byTruncatingMiddle
-        commandLabel.maximumNumberOfLines = 1
+        pidLabel.font = .monospacedSystemFont(ofSize: 11, weight: .regular)
+        pidLabel.textColor = .secondaryLabelColor
 
-        contentStack.addArrangedSubview(titleStack)
-        contentStack.addArrangedSubview(directoryLabel)
-        contentStack.addArrangedSubview(commandLabel)
-
-        let buttonStack = NSStackView()
-        buttonStack.orientation = .horizontal
-        buttonStack.alignment = .centerY
-        buttonStack.spacing = 6
         stopButton.bezelStyle = .rounded
         stopButton.controlSize = .small
         stopButton.target = self
         stopButton.action = #selector(stopPressed)
+
         changePortButton.bezelStyle = .rounded
         changePortButton.controlSize = .small
         changePortButton.target = self
         changePortButton.action = #selector(changePortPressed)
-        buttonStack.addArrangedSubview(stopButton)
-        buttonStack.addArrangedSubview(changePortButton)
 
-        let rowStack = NSStackView()
-        rowStack.orientation = .horizontal
-        rowStack.alignment = .top
-        rowStack.spacing = 12
-        rowStack.translatesAutoresizingMaskIntoConstraints = false
-        rowStack.addArrangedSubview(contentStack)
-        rowStack.addArrangedSubview(buttonStack)
-        contentStack.setContentHuggingPriority(.defaultLow, for: .horizontal)
-        contentStack.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        buttonStack.setContentHuggingPriority(.required, for: .horizontal)
-
-        addSubview(rowStack)
-        NSLayoutConstraint.activate([
-            rowStack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 10),
-            rowStack.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -10),
-            rowStack.topAnchor.constraint(equalTo: topAnchor, constant: 9),
-            rowStack.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -9),
-            heightAnchor.constraint(greaterThanOrEqualToConstant: 72)
-        ])
+        addSubview(projectLabel)
+        addSubview(portsLabel)
+        addSubview(directoryLabel)
+        addSubview(pidLabel)
+        addSubview(stopButton)
+        addSubview(changePortButton)
     }
+}
+
+private final class NodeServerListView: NSView {
+    override var isFlipped: Bool { true }
 }
 
 final class RestartDialogView: NSView {
@@ -124,7 +135,7 @@ final class RestartDialogView: NSView {
     let portEnvironmentCheckbox = NSButton(checkboxWithTitle: "Set PORT environment variable", target: nil, action: nil)
 
     init(plan: RestartPlan) {
-        super.init(frame: NSRect(x: 0, y: 0, width: 440, height: 260))
+        super.init(frame: NSRect(x: 0, y: 0, width: 430, height: 260))
         portField.stringValue = String(plan.requestedPort)
         commandField.stringValue = plan.command
         setup(plan: plan)
@@ -135,59 +146,49 @@ final class RestartDialogView: NSView {
     }
 
     private func setup(plan: RestartPlan) {
-        let stack = NSStackView()
-        stack.orientation = .vertical
-        stack.alignment = .leading
-        stack.spacing = 8
-        stack.translatesAutoresizingMaskIntoConstraints = false
-
         let portLabel = NSTextField(labelWithString: "New port")
         portLabel.font = .systemFont(ofSize: 12, weight: .semibold)
+        portLabel.frame = NSRect(x: 0, y: 230, width: 100, height: 18)
+
         portField.font = .monospacedSystemFont(ofSize: 13, weight: .regular)
         portField.controlSize = .regular
         portField.placeholderString = "1–65535"
-        portField.translatesAutoresizingMaskIntoConstraints = false
-        portField.widthAnchor.constraint(equalToConstant: 100).isActive = true
+        portField.frame = NSRect(x: 0, y: 200, width: 100, height: 24)
 
         let commandLabel = NSTextField(labelWithString: "Restart command")
         commandLabel.font = .systemFont(ofSize: 12, weight: .semibold)
+        commandLabel.frame = NSRect(x: 0, y: 169, width: 180, height: 18)
+
         commandField.font = .monospacedSystemFont(ofSize: 11, weight: .regular)
         commandField.placeholderString = "Enter a command, for example: npm run dev"
         commandField.usesSingleLineMode = true
         commandField.lineBreakMode = .byTruncatingMiddle
-        commandField.translatesAutoresizingMaskIntoConstraints = false
-        commandField.widthAnchor.constraint(equalToConstant: 440).isActive = true
+        commandField.frame = NSRect(x: 0, y: 137, width: 430, height: 24)
 
         let directoryLabel = NSTextField(wrappingLabelWithString: "Working directory: \(plan.workingDirectory.path)")
         directoryLabel.font = .systemFont(ofSize: 11)
         directoryLabel.textColor = .secondaryLabelColor
-        directoryLabel.maximumNumberOfLines = 2
+        directoryLabel.frame = NSRect(x: 0, y: 95, width: 430, height: 34)
 
         let note = plan.inferenceNote.isEmpty
-            ? "NodeBar will use a login zsh environment; the original process environment is not copied."
-            : "\(plan.inferenceNote) NodeBar will use a login zsh environment; the original process environment is not copied."
+            ? "NodeBar uses a login zsh environment; the original process environment is not copied."
+            : "\(plan.inferenceNote) NodeBar uses a login zsh environment; the original process environment is not copied."
         let noteLabel = NSTextField(wrappingLabelWithString: note)
         noteLabel.font = .systemFont(ofSize: 11)
         noteLabel.textColor = .secondaryLabelColor
-        noteLabel.maximumNumberOfLines = 3
+        noteLabel.frame = NSRect(x: 0, y: 0, width: 430, height: 46)
 
         portEnvironmentCheckbox.font = .systemFont(ofSize: 11)
         portEnvironmentCheckbox.toolTip = "Some frameworks read PORT; others ignore it."
+        portEnvironmentCheckbox.frame = NSRect(x: 0, y: 64, width: 260, height: 22)
 
-        stack.addArrangedSubview(portLabel)
-        stack.addArrangedSubview(portField)
-        stack.addArrangedSubview(commandLabel)
-        stack.addArrangedSubview(commandField)
-        stack.addArrangedSubview(directoryLabel)
-        stack.addArrangedSubview(portEnvironmentCheckbox)
-        stack.addArrangedSubview(noteLabel)
-        addSubview(stack)
-        NSLayoutConstraint.activate([
-            stack.leadingAnchor.constraint(equalTo: leadingAnchor),
-            stack.trailingAnchor.constraint(equalTo: trailingAnchor),
-            stack.topAnchor.constraint(equalTo: topAnchor),
-            stack.bottomAnchor.constraint(equalTo: bottomAnchor)
-        ])
+        addSubview(portLabel)
+        addSubview(portField)
+        addSubview(commandLabel)
+        addSubview(commandField)
+        addSubview(directoryLabel)
+        addSubview(portEnvironmentCheckbox)
+        addSubview(noteLabel)
     }
 }
 
@@ -197,9 +198,16 @@ final class NodeBarViewController: NSViewController {
     private let planner = RestartPlanner()
     private var rows: [Int32: NodeServerRowView] = [:]
     private var busyPIDs: Set<Int32> = []
+    private let titleLabel = NSTextField(labelWithString: "NodeBar")
     private let countLabel = NSTextField(labelWithString: "")
     private let stateLabel = NSTextField(labelWithString: "")
-    private let listStack = NSStackView()
+    private let refreshButton = NSButton()
+    private let quitButton = NSButton(title: "Quit", target: nil, action: nil)
+    private let scrollView = NSScrollView()
+    private let listView = NodeServerListView()
+    private var panelSize = NSSize(width: NodeBarLayout.panelWidth, height: NodeBarLayout.minimumPanelHeight)
+
+    var onPreferredSizeChange: ((NSSize) -> Void)?
 
     init(store: ServerStore, actionService: ProcessActionService) {
         self.store = store
@@ -212,7 +220,8 @@ final class NodeBarViewController: NSViewController {
     }
 
     override func loadView() {
-        view = NSView(frame: NSRect(x: 0, y: 0, width: 460, height: 480))
+        view = NSView(frame: NSRect(origin: .zero, size: panelSize))
+        view.wantsLayer = true
     }
 
     override func viewDidLoad() {
@@ -233,84 +242,55 @@ final class NodeBarViewController: NSViewController {
     }
 
     private func setupView() {
-        let rootStack = NSStackView()
-        rootStack.orientation = .vertical
-        rootStack.spacing = 10
-        rootStack.translatesAutoresizingMaskIntoConstraints = false
-
-        let header = NSStackView()
-        header.orientation = .horizontal
-        header.alignment = .centerY
-        header.spacing = 8
-        let titleLabel = NSTextField(labelWithString: "Node servers")
         titleLabel.font = .systemFont(ofSize: 15, weight: .semibold)
         countLabel.font = .systemFont(ofSize: 12)
         countLabel.textColor = .secondaryLabelColor
-        countLabel.setContentHuggingPriority(.required, for: .horizontal)
-        let refreshButton = NSButton(image: NSImage(systemSymbolName: "arrow.clockwise", accessibilityDescription: "Refresh") ?? NSImage(), target: self, action: #selector(refreshPressed))
+
+        refreshButton.image = NSImage(systemSymbolName: "arrow.clockwise", accessibilityDescription: "Refresh")
+        refreshButton.title = ""
         refreshButton.isBordered = false
-        refreshButton.setContentHuggingPriority(.required, for: .horizontal)
+        refreshButton.target = self
+        refreshButton.action = #selector(refreshPressed)
         refreshButton.toolTip = "Refresh now"
-        header.addArrangedSubview(titleLabel)
-        header.addArrangedSubview(countLabel)
-        header.addArrangedSubview(NSView())
-        header.addArrangedSubview(refreshButton)
 
-        listStack.orientation = .vertical
-        listStack.alignment = .leading
-        listStack.spacing = 0
-        listStack.translatesAutoresizingMaskIntoConstraints = false
-
-        let documentView = NSView()
-        documentView.translatesAutoresizingMaskIntoConstraints = false
-        documentView.addSubview(listStack)
-        NSLayoutConstraint.activate([
-            listStack.leadingAnchor.constraint(equalTo: documentView.leadingAnchor),
-            listStack.trailingAnchor.constraint(equalTo: documentView.trailingAnchor),
-            listStack.topAnchor.constraint(equalTo: documentView.topAnchor),
-            listStack.bottomAnchor.constraint(equalTo: documentView.bottomAnchor),
-            listStack.widthAnchor.constraint(equalTo: documentView.widthAnchor)
-        ])
-
-        let scrollView = NSScrollView()
-        scrollView.borderType = .bezelBorder
-        scrollView.hasVerticalScroller = true
-        scrollView.autohidesScrollers = true
-        scrollView.documentView = documentView
-        scrollView.translatesAutoresizingMaskIntoConstraints = false
-        documentView.widthAnchor.constraint(equalTo: scrollView.contentView.widthAnchor).isActive = true
-        scrollView.heightAnchor.constraint(equalToConstant: 370).isActive = true
-
-        stateLabel.font = .systemFont(ofSize: 11)
-        stateLabel.textColor = .secondaryLabelColor
-        stateLabel.lineBreakMode = .byTruncatingTail
-        stateLabel.maximumNumberOfLines = 1
-
-        let footer = NSStackView()
-        footer.orientation = .horizontal
-        footer.alignment = .centerY
-        footer.spacing = 8
-        footer.addArrangedSubview(stateLabel)
-        footer.addArrangedSubview(NSView())
-        let quitButton = NSButton(title: "Quit", target: self, action: #selector(quitPressed))
         quitButton.bezelStyle = .rounded
         quitButton.controlSize = .small
-        footer.addArrangedSubview(quitButton)
+        quitButton.target = self
+        quitButton.action = #selector(quitPressed)
 
-        rootStack.addArrangedSubview(header)
-        rootStack.addArrangedSubview(scrollView)
-        rootStack.addArrangedSubview(footer)
-        view.addSubview(rootStack)
-        NSLayoutConstraint.activate([
-            rootStack.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 14),
-            rootStack.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -14),
-            rootStack.topAnchor.constraint(equalTo: view.topAnchor, constant: 14),
-            rootStack.bottomAnchor.constraint(equalTo: view.bottomAnchor, constant: -12)
-        ])
+        scrollView.borderType = .noBorder
+        scrollView.hasVerticalScroller = true
+        scrollView.autohidesScrollers = true
+        scrollView.drawsBackground = false
+        scrollView.documentView = listView
+        stateLabel.font = .systemFont(ofSize: 11)
+        stateLabel.lineBreakMode = .byTruncatingTail
+        stateLabel.maximumNumberOfLines = 1
+        view.addSubview(titleLabel)
+        view.addSubview(countLabel)
+        view.addSubview(refreshButton)
+        view.addSubview(scrollView)
+        view.addSubview(stateLabel)
+        view.addSubview(quitButton)
+    }
+
+    private func applyPanelSize(_ size: NSSize) {
+        panelSize = size
+        preferredContentSize = size
+        view.setFrameSize(size)
+        let width = size.width
+        let height = size.height
+        titleLabel.frame = NSRect(x: 16, y: height - 34, width: 76, height: 22)
+        countLabel.frame = NSRect(x: 96, y: height - 33, width: 120, height: 20)
+        refreshButton.frame = NSRect(x: width - 43, y: height - 35, width: 26, height: 26)
+        scrollView.frame = NSRect(x: 12, y: NodeBarLayout.footerHeight, width: width - 24, height: height - NodeBarLayout.headerHeight - NodeBarLayout.footerHeight)
+        stateLabel.frame = NSRect(x: 16, y: 11, width: width - 92, height: 18)
+        quitButton.frame = NSRect(x: width - 66, y: 8, width: 52, height: 24)
     }
 
     private func render() {
-        countLabel.stringValue = store.servers.isEmpty ? "" : "\(store.servers.count) listening"
+        let serverCount = store.servers.count
+        countLabel.stringValue = serverCount == 0 ? "" : "\(serverCount) listening"
         if let error = store.lastError {
             stateLabel.stringValue = error
             stateLabel.textColor = .systemRed
@@ -322,25 +302,37 @@ final class NodeBarViewController: NSViewController {
             stateLabel.textColor = .secondaryLabelColor
         }
 
-        let currentPIDs = Set(store.servers.map(\.pid))
-        rows = rows.filter { currentPIDs.contains($0.key) }
-        listStack.arrangedSubviews.forEach { view in
-            listStack.removeArrangedSubview(view)
-            view.removeFromSuperview()
+        let listHeight = serverCount == 0
+            ? NodeBarLayout.emptyListHeight
+            : CGFloat(min(serverCount, 4)) * NodeBarLayout.rowHeight
+        let requestedHeight = NodeBarLayout.headerHeight + NodeBarLayout.footerHeight + listHeight
+        let newHeight = min(NodeBarLayout.maximumPanelHeight, max(NodeBarLayout.minimumPanelHeight, requestedHeight))
+        let newSize = NSSize(width: NodeBarLayout.panelWidth, height: newHeight)
+        if panelSize != newSize {
+            applyPanelSize(newSize)
+            onPreferredSizeChange?(newSize)
+        } else {
+            applyPanelSize(panelSize)
         }
 
-        if store.servers.isEmpty {
+        listView.subviews.forEach { $0.removeFromSuperview() }
+        if serverCount == 0 {
+            listView.frame = NSRect(x: 0, y: 0, width: scrollView.contentView.bounds.width, height: max(scrollView.contentView.bounds.height, NodeBarLayout.emptyListHeight))
             let emptyLabel = NSTextField(wrappingLabelWithString: store.lastError == nil ? "No Node.js TCP listeners found." : "Refresh failed. Try again after checking lsof permissions.")
             emptyLabel.font = .systemFont(ofSize: 12)
             emptyLabel.textColor = .secondaryLabelColor
             emptyLabel.alignment = .center
-            emptyLabel.translatesAutoresizingMaskIntoConstraints = false
-            listStack.addArrangedSubview(emptyLabel)
-            emptyLabel.widthAnchor.constraint(equalTo: listStack.widthAnchor, constant: -20).isActive = true
+            emptyLabel.frame = NSRect(x: 14, y: 28, width: max(40, listView.bounds.width - 28), height: 40)
+            listView.addSubview(emptyLabel)
             return
         }
 
-        for server in store.servers {
+        let currentPIDs = Set(store.servers.map(\.pid))
+        rows = rows.filter { currentPIDs.contains($0.key) }
+        let listWidth = scrollView.contentView.bounds.width
+        let contentHeight = CGFloat(serverCount) * NodeBarLayout.rowHeight
+        listView.frame = NSRect(x: 0, y: 0, width: listWidth, height: max(scrollView.contentView.bounds.height, contentHeight))
+        for (index, server) in store.servers.enumerated() {
             let row: NodeServerRowView
             if let existing = rows[server.pid] {
                 row = existing
@@ -351,13 +343,14 @@ final class NodeBarViewController: NSViewController {
                 row.onChangePort = { [weak self] server in self?.changePort(server) }
                 rows[server.pid] = row
             }
+            row.frame = NSRect(x: 0, y: CGFloat(index) * NodeBarLayout.rowHeight, width: listWidth, height: NodeBarLayout.rowHeight)
             row.setBusy(busyPIDs.contains(server.pid))
-            listStack.addArrangedSubview(row)
-            row.widthAnchor.constraint(equalTo: listStack.widthAnchor).isActive = true
-            let divider = NSBox()
-            divider.boxType = .separator
-            listStack.addArrangedSubview(divider)
-            divider.widthAnchor.constraint(equalTo: listStack.widthAnchor).isActive = true
+            listView.addSubview(row)
+            if index < serverCount - 1 {
+                let divider = NSBox(frame: NSRect(x: 12, y: CGFloat(index + 1) * NodeBarLayout.rowHeight - 1, width: listWidth - 24, height: 1))
+                divider.boxType = .separator
+                listView.addSubview(divider)
+            }
         }
     }
 

@@ -24,9 +24,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let viewController = NodeBarViewController(store: store, actionService: actionService)
         let nodePopover = NSPopover()
         nodePopover.contentViewController = viewController
-        nodePopover.contentSize = NSSize(width: 460, height: 480)
+        nodePopover.contentSize = NSSize(width: 400, height: 180)
         nodePopover.behavior = .transient
         nodePopover.animates = true
+        viewController.onPreferredSizeChange = { [weak nodePopover] size in
+            nodePopover?.contentSize = size
+        }
         popover = nodePopover
 
         store.start()
