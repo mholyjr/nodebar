@@ -7,7 +7,7 @@ It is dependency-free, runs as a menu bar accessory, and does not add a Dock ico
 ## Requirements
 
 - macOS 13 or newer
-- Swift 5.10 or newer with the Xcode Command Line Tools
+- Xcode 26 or the Xcode 26 Command Line Tools, providing Swift 6.2 and the macOS 26 SDK for the build
 - `lsof` for listener discovery; the Cleanup tab also uses the system `git` command and the package-manager tools available on the machine when their caches are selected
 
 On macOS 26 and newer the panel uses `NSGlassEffectView` for the system glass treatment. On macOS 13–25 it uses the compatible popover visual-effect material, while keeping the same native controls and layout.
